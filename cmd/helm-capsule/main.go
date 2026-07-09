@@ -102,6 +102,71 @@ type Proof struct {
 	Error                string             `json:"error,omitempty"`
 }
 
+type Plan struct {
+	APIVersion        string             `json:"apiVersion" yaml:"apiVersion"`
+	Kind              string             `json:"kind" yaml:"kind"`
+	Status            string             `json:"status" yaml:"status"`
+	RequiredInputs    []PlanInput        `json:"required_inputs,omitempty" yaml:"required_inputs,omitempty"`
+	Detected          PlanDetected       `json:"detected" yaml:"detected"`
+	UnsupportedFields []UnsupportedField `json:"unsupported_fields,omitempty" yaml:"unsupported_fields,omitempty"`
+}
+
+type PlanInput struct {
+	Type        string            `json:"type" yaml:"type"`
+	Reason      string            `json:"reason" yaml:"reason"`
+	Resources   []string          `json:"resources,omitempty" yaml:"resources,omitempty"`
+	Paths       []string          `json:"paths,omitempty" yaml:"paths,omitempty"`
+	Suggestions []string          `json:"suggestions,omitempty" yaml:"suggestions,omitempty"`
+	Details     map[string]string `json:"details,omitempty" yaml:"details,omitempty"`
+}
+
+type PlanDetected struct {
+	Workloads       []PlanWorkload       `json:"workloads,omitempty" yaml:"workloads,omitempty"`
+	ServiceAccounts []PlanServiceAccount `json:"service_accounts,omitempty" yaml:"service_accounts,omitempty"`
+	PVCs            []PlanPVC            `json:"pvcs,omitempty" yaml:"pvcs,omitempty"`
+	Services        []PlanService        `json:"services,omitempty" yaml:"services,omitempty"`
+	SecretRefs      []PlanSecretRef      `json:"secret_refs,omitempty" yaml:"secret_refs,omitempty"`
+}
+
+type PlanWorkload struct {
+	Resource           string   `json:"resource" yaml:"resource"`
+	PodSpecPath        string   `json:"pod_spec_path" yaml:"pod_spec_path"`
+	ServiceAccountName string   `json:"service_account_name,omitempty" yaml:"service_account_name,omitempty"`
+	ImagePullSecrets   []string `json:"image_pull_secrets,omitempty" yaml:"image_pull_secrets,omitempty"`
+}
+
+type PlanPVC struct {
+	Resource         string   `json:"resource" yaml:"resource"`
+	Path             string   `json:"path" yaml:"path"`
+	StorageClassName string   `json:"storage_class_name,omitempty" yaml:"storage_class_name,omitempty"`
+	AccessModes      []string `json:"access_modes,omitempty" yaml:"access_modes,omitempty"`
+	Size             string   `json:"size,omitempty" yaml:"size,omitempty"`
+}
+
+type PlanServiceAccount struct {
+	Resource         string   `json:"resource" yaml:"resource"`
+	Name             string   `json:"name" yaml:"name"`
+	ImagePullSecrets []string `json:"image_pull_secrets,omitempty" yaml:"image_pull_secrets,omitempty"`
+}
+
+type PlanService struct {
+	Resource string            `json:"resource" yaml:"resource"`
+	Ports    []PlanServicePort `json:"ports" yaml:"ports"`
+}
+
+type PlanServicePort struct {
+	Name       string `json:"name,omitempty" yaml:"name,omitempty"`
+	Port       string `json:"port" yaml:"port"`
+	TargetPort string `json:"target_port,omitempty" yaml:"target_port,omitempty"`
+	Protocol   string `json:"protocol,omitempty" yaml:"protocol,omitempty"`
+}
+
+type PlanSecretRef struct {
+	Resource string `json:"resource" yaml:"resource"`
+	Path     string `json:"path" yaml:"path"`
+	Name     string `json:"name" yaml:"name"`
+}
+
 type stringList []string
 
 func (s *stringList) String() string {
@@ -267,6 +332,11 @@ func resourceLabel(resource *yaml.Node) string {
 	return fmt.Sprintf("%s/%s", kind, name)
 }
 
+func resourceName(resource *yaml.Node) string {
+	metadata := mapValue(resource, "metadata")
+	return scalarString(mapValue(metadata, "name"))
+}
+
 func isHelmHook(resource *yaml.Node) bool {
 	metadata := mapValue(resource, "metadata")
 	annotations := mapValue(metadata, "annotations")
@@ -386,6 +456,289 @@ func collectUnsupportedImageFields(docs []*yaml.Node, supported map[string]bool)
 		walk(doc, Path{indexStep(i)}, "")
 	}
 	return out
+}
+
+func sequenceScalarStrings(n *yaml.Node) []string {
+	if n == nil || n.Kind != yaml.SequenceNode {
+		return nil
+	}
+	var out []string
+	for _, child := range n.Content {
+		value := scalarString(child)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func imagePullSecretNames(podSpec *yaml.Node) []string {
+	secrets := mapValue(podSpec, "imagePullSecrets")
+	if secrets == nil || secrets.Kind != yaml.SequenceNode {
+		return nil
+	}
+	var out []string
+	for _, item := range secrets.Content {
+		if item.Kind == yaml.MappingNode {
+			if name := scalarString(mapValue(item, "name")); name != "" {
+				out = append(out, name)
+			}
+			continue
+		}
+		if name := scalarString(item); name != "" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func dedupeSorted(values []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func pvcPlan(resource string, path Path, spec *yaml.Node) PlanPVC {
+	storageClassName := scalarString(mapValue(spec, "storageClassName"))
+	resources := mapValue(spec, "resources")
+	requests := mapValue(resources, "requests")
+	return PlanPVC{
+		Resource:         resource,
+		Path:             path.String(),
+		StorageClassName: storageClassName,
+		AccessModes:      sequenceScalarStrings(mapValue(spec, "accessModes")),
+		Size:             scalarString(mapValue(requests, "storage")),
+	}
+}
+
+func servicePlan(resource string, spec *yaml.Node) PlanService {
+	service := PlanService{Resource: resource}
+	ports := mapValue(spec, "ports")
+	if ports == nil || ports.Kind != yaml.SequenceNode {
+		return service
+	}
+	for _, portNode := range ports.Content {
+		if portNode.Kind != yaml.MappingNode {
+			continue
+		}
+		port := PlanServicePort{
+			Name:       scalarString(mapValue(portNode, "name")),
+			Port:       scalarString(mapValue(portNode, "port")),
+			TargetPort: scalarString(mapValue(portNode, "targetPort")),
+			Protocol:   scalarString(mapValue(portNode, "protocol")),
+		}
+		service.Ports = append(service.Ports, port)
+	}
+	return service
+}
+
+func collectSecretRefs(resource string, resourceNode *yaml.Node, resourcePath Path) []PlanSecretRef {
+	var refs []PlanSecretRef
+	var walk func(*yaml.Node, Path)
+	walk = func(n *yaml.Node, path Path) {
+		if n == nil {
+			return
+		}
+		switch n.Kind {
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				key := n.Content[i].Value
+				child := n.Content[i+1]
+				childPath := append(append(Path{}, path...), keyStep(key))
+				if key == "secretName" {
+					if name := scalarString(child); name != "" {
+						refs = append(refs, PlanSecretRef{Resource: resource, Path: childPath.String(), Name: name})
+					}
+				}
+				if key == "secretKeyRef" || key == "secretRef" {
+					namePath := append(append(Path{}, childPath...), keyStep("name"))
+					if name := scalarString(mapValue(child, "name")); name != "" {
+						refs = append(refs, PlanSecretRef{Resource: resource, Path: namePath.String(), Name: name})
+					}
+				}
+				walk(child, childPath)
+			}
+		case yaml.SequenceNode:
+			for i, child := range n.Content {
+				walk(child, append(append(Path{}, path...), indexStep(i)))
+			}
+		}
+	}
+	walk(resourceNode, resourcePath)
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Resource == refs[j].Resource {
+			return refs[i].Path < refs[j].Path
+		}
+		return refs[i].Resource < refs[j].Resource
+	})
+	return refs
+}
+
+func makePlan(docs []*yaml.Node, expectedPullSecret string) Plan {
+	plan := Plan{
+		APIVersion: "helm-capsule/v1alpha1",
+		Kind:       "InstallPlan",
+		Status:     "READY",
+	}
+	serviceAccountSecrets := map[string][]string{}
+	for docIndex, doc := range docs {
+		base := Path{indexStep(docIndex)}
+		iterResourceDocs(doc, base, func(resource *yaml.Node, resourcePath Path) {
+			if scalarString(mapValue(resource, "kind")) != "ServiceAccount" {
+				return
+			}
+			name := resourceName(resource)
+			if name == "" {
+				return
+			}
+			secrets := imagePullSecretNames(resource)
+			serviceAccountSecrets[name] = secrets
+			plan.Detected.ServiceAccounts = append(plan.Detected.ServiceAccounts, PlanServiceAccount{
+				Resource:         resourceLabel(resource),
+				Name:             name,
+				ImagePullSecrets: secrets,
+			})
+		})
+	}
+	var storageResources []string
+	var storagePaths []string
+	var pullSecretResources []string
+	var pullSecretPaths []string
+
+	for docIndex, doc := range docs {
+		base := Path{indexStep(docIndex)}
+		iterResourceDocs(doc, base, func(resource *yaml.Node, resourcePath Path) {
+			kind := scalarString(mapValue(resource, "kind"))
+			label := resourceLabel(resource)
+			spec := mapValue(resource, "spec")
+
+			if podSpecRel, ok := supportedPodSpecPaths[kind]; ok {
+				podSpecPath := appendKeys(resourcePath, podSpecRel)
+				podSpec, err := nodeAt(docs, podSpecPath)
+				if err == nil && podSpec != nil && podSpec.Kind == yaml.MappingNode {
+					workload := PlanWorkload{
+						Resource:           label,
+						PodSpecPath:        podSpecPath.String(),
+						ServiceAccountName: scalarString(mapValue(podSpec, "serviceAccountName")),
+						ImagePullSecrets:   imagePullSecretNames(podSpec),
+					}
+					plan.Detected.Workloads = append(plan.Detected.Workloads, workload)
+					serviceAccountName := workload.ServiceAccountName
+					if serviceAccountName == "" {
+						serviceAccountName = "default"
+					}
+					serviceAccountHasSecret := containsString(serviceAccountSecrets[serviceAccountName], expectedPullSecret)
+					if expectedPullSecret != "" && !containsString(workload.ImagePullSecrets, expectedPullSecret) && !serviceAccountHasSecret {
+						pullSecretResources = append(pullSecretResources, label)
+						pullSecretPaths = append(pullSecretPaths, append(append(Path{}, podSpecPath...), keyStep("imagePullSecrets")).String())
+					}
+				}
+			}
+
+			switch kind {
+			case "PersistentVolumeClaim":
+				if spec != nil {
+					path := append(append(Path{}, resourcePath...), keyStep("spec"))
+					pvc := pvcPlan(label, path, spec)
+					plan.Detected.PVCs = append(plan.Detected.PVCs, pvc)
+					if pvc.StorageClassName == "" {
+						storageResources = append(storageResources, label)
+						storagePaths = append(storagePaths, append(append(Path{}, path...), keyStep("storageClassName")).String())
+					}
+				}
+			case "StatefulSet":
+				templates := mapValue(spec, "volumeClaimTemplates")
+				if templates != nil && templates.Kind == yaml.SequenceNode {
+					for i, template := range templates.Content {
+						templateSpec := mapValue(template, "spec")
+						if templateSpec == nil {
+							continue
+						}
+						path := append(append(Path{}, resourcePath...), keyStep("spec"), keyStep("volumeClaimTemplates"), indexStep(i), keyStep("spec"))
+						pvc := pvcPlan(fmt.Sprintf("%s volumeClaimTemplates[%d]", label, i), path, templateSpec)
+						plan.Detected.PVCs = append(plan.Detected.PVCs, pvc)
+						if pvc.StorageClassName == "" {
+							storageResources = append(storageResources, label)
+							storagePaths = append(storagePaths, append(append(Path{}, path...), keyStep("storageClassName")).String())
+						}
+					}
+				}
+			case "Service":
+				service := servicePlan(label, spec)
+				if len(service.Ports) > 0 {
+					plan.Detected.Services = append(plan.Detected.Services, service)
+				}
+			}
+
+			plan.Detected.SecretRefs = append(plan.Detected.SecretRefs, collectSecretRefs(label, resource, resourcePath)...)
+		})
+	}
+
+	if len(storageResources) > 0 {
+		plan.RequiredInputs = append(plan.RequiredInputs, PlanInput{
+			Type:      "storageClass",
+			Reason:    "PVC exists but storageClassName is empty",
+			Resources: dedupeSorted(storageResources),
+			Paths:     dedupeSorted(storagePaths),
+			Suggestions: []string{
+				"Set the chart value that controls persistence.storageClass or storageClassName",
+				"Run kubectl get storageclass to choose a cluster-supported class",
+			},
+		})
+	}
+	if expectedPullSecret != "" && len(pullSecretResources) > 0 {
+		plan.RequiredInputs = append(plan.RequiredInputs, PlanInput{
+			Type:      "imagePullSecret",
+			Reason:    "expected imagePullSecret is not referenced by one or more PodSpecs",
+			Resources: dedupeSorted(pullSecretResources),
+			Paths:     dedupeSorted(pullSecretPaths),
+			Suggestions: []string{
+				"Set the chart value that controls imagePullSecrets",
+				"Or patch the rendered ServiceAccount before pods are created",
+			},
+			Details: map[string]string{"expected_secret": expectedPullSecret},
+		})
+	}
+
+	supported := map[string]bool{}
+	for _, occurrence := range collectSupportedImages(docs) {
+		supported[occurrence.Path.String()] = true
+	}
+	plan.UnsupportedFields = collectUnsupportedImageFields(docs, supported)
+	if len(plan.RequiredInputs) > 0 {
+		plan.Status = "NEEDS_INPUT"
+	}
+	sort.Slice(plan.Detected.Workloads, func(i, j int) bool { return plan.Detected.Workloads[i].Resource < plan.Detected.Workloads[j].Resource })
+	sort.Slice(plan.Detected.ServiceAccounts, func(i, j int) bool {
+		return plan.Detected.ServiceAccounts[i].Resource < plan.Detected.ServiceAccounts[j].Resource
+	})
+	sort.Slice(plan.Detected.PVCs, func(i, j int) bool { return plan.Detected.PVCs[i].Path < plan.Detected.PVCs[j].Path })
+	sort.Slice(plan.Detected.Services, func(i, j int) bool { return plan.Detected.Services[i].Resource < plan.Detected.Services[j].Resource })
+	sort.Slice(plan.Detected.SecretRefs, func(i, j int) bool {
+		if plan.Detected.SecretRefs[i].Resource == plan.Detected.SecretRefs[j].Resource {
+			return plan.Detected.SecretRefs[i].Path < plan.Detected.SecretRefs[j].Path
+		}
+		return plan.Detected.SecretRefs[i].Resource < plan.Detected.SecretRefs[j].Resource
+	})
+	return plan
 }
 
 type imageRef struct {
@@ -816,6 +1169,78 @@ func copyValues(outDir string, values []string) error {
 		}
 	}
 	return nil
+}
+
+func writePlan(plan Plan, path string) error {
+	jsonPath, yamlPath := lockOutputPaths(path)
+	jsonData, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(jsonPath, append(jsonData, '\n'), 0644); err != nil {
+		return err
+	}
+	yamlData, err := yaml.Marshal(plan)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(yamlPath, yamlData, 0644)
+}
+
+func commandPlan(args []string) int {
+	fs := flag.NewFlagSet("plan", flag.ExitOnError)
+	var values stringList
+	var apiVersions stringList
+	release := fs.String("release", "", "Helm release name")
+	namespace := fs.String("namespace", "", "target namespace")
+	kubeVersion := fs.String("kube-version", "", "Kubernetes version for helm template")
+	outDir := fs.String("out", "", "plan output directory")
+	renderedManifest := fs.String("rendered-manifest", "", "pre-rendered manifest path")
+	helmBinary := fs.String("helm-binary", "helm", "helm binary")
+	pullSecret := fs.String("pull-secret", "", "expected imagePullSecret name")
+	fs.Var(&values, "f", "values file")
+	fs.Var(&values, "values", "values file")
+	fs.Var(&apiVersions, "api-version", "Kubernetes API version for helm template")
+
+	chart, parseArgs := splitLeadingPositional(args)
+	if err := fs.Parse(parseArgs); err != nil {
+		return fail(err)
+	}
+	if chart == "" && fs.NArg() > 0 {
+		chart = fs.Arg(0)
+	}
+	if *release == "" || *namespace == "" || *outDir == "" {
+		return fail(errors.New("--release, --namespace, and --out are required"))
+	}
+	rendered, err := renderChart(chart, *release, *namespace, *kubeVersion, *helmBinary, values, apiVersions, *renderedManifest)
+	if err != nil {
+		return fail(err)
+	}
+	docs, err := parseYAMLDocuments(rendered)
+	if err != nil {
+		return fail(err)
+	}
+	plan := makePlan(docs, *pullSecret)
+	if err := os.MkdirAll(*outDir, 0755); err != nil {
+		return fail(err)
+	}
+	if err := os.WriteFile(filepath.Join(*outDir, "rendered.plan.yaml"), rendered, 0644); err != nil {
+		return fail(err)
+	}
+	if err := writePlan(plan, filepath.Join(*outDir, "plan.json")); err != nil {
+		return fail(err)
+	}
+	if err := copyValues(*outDir, values); err != nil {
+		return fail(err)
+	}
+	fmt.Println(plan.Status)
+	fmt.Printf("required_inputs: %d\n", len(plan.RequiredInputs))
+	if len(plan.RequiredInputs) > 0 {
+		for _, input := range plan.RequiredInputs {
+			fmt.Printf("- %s: %s\n", input.Type, input.Reason)
+		}
+	}
+	return 0
 }
 
 func commandBuild(args []string) int {
@@ -1380,6 +1805,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `helm-capsule
 
 Usage:
+  helm-capsule plan <chart> --release NAME --namespace NS --out DIR [--pull-secret NAME] [flags]
   helm-capsule build <chart> --release NAME --namespace NS --target-registry REG --out DIR [flags]
   helm-capsule mirror <images.lock.yaml|json> [--dry-run] [--tool auto|crane|skopeo]
   helm-capsule verify <capsule-dir>
@@ -1396,6 +1822,8 @@ func main() {
 	}
 	var code int
 	switch os.Args[1] {
+	case "plan":
+		code = commandPlan(os.Args[2:])
 	case "build":
 		code = commandBuild(os.Args[2:])
 	case "mirror":

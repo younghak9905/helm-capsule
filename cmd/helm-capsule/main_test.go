@@ -73,6 +73,46 @@ spec:
         image: auto
 `
 
+const planManifest = `apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: opensearch-cluster-master
+spec:
+  serviceName: opensearch-cluster-master-headless
+  template:
+    spec:
+      serviceAccountName: opensearch-sa
+      containers:
+      - name: opensearch
+        image: opensearchproject/opensearch:3.7.0
+        env:
+        - name: OPENSEARCH_INITIAL_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: opensearch-admin
+              key: password
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 30Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch-dashboards
+spec:
+  ports:
+  - name: http
+    port: 5601
+    targetPort: 5601
+    protocol: TCP
+`
+
 func buildLockFromManifest(t *testing.T, rendered string) (ImageLock, []byte) {
 	t.Helper()
 	docs, err := parseYAMLDocuments([]byte(rendered))
@@ -168,6 +208,68 @@ func TestImageAutoPlaceholderIsNotRetargeted(t *testing.T) {
 	}
 }
 
+func planInputByType(plan Plan, inputType string) (PlanInput, bool) {
+	for _, input := range plan.RequiredInputs {
+		if input.Type == inputType {
+			return input, true
+		}
+	}
+	return PlanInput{}, false
+}
+
+func TestPlanDetectsStorageAndPullSecretInputs(t *testing.T) {
+	docs, err := parseYAMLDocuments([]byte(planManifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := makePlan(docs, "registry-cloud-kt")
+	if plan.Status != "NEEDS_INPUT" {
+		t.Fatalf("expected NEEDS_INPUT, got %#v", plan)
+	}
+	storage, ok := planInputByType(plan, "storageClass")
+	if !ok {
+		t.Fatalf("missing storageClass input: %#v", plan.RequiredInputs)
+	}
+	if len(storage.Resources) != 1 || storage.Resources[0] != "StatefulSet/opensearch-cluster-master" {
+		t.Fatalf("unexpected storage resources: %#v", storage.Resources)
+	}
+	pullSecret, ok := planInputByType(plan, "imagePullSecret")
+	if !ok {
+		t.Fatalf("missing imagePullSecret input: %#v", plan.RequiredInputs)
+	}
+	if pullSecret.Details["expected_secret"] != "registry-cloud-kt" {
+		t.Fatalf("unexpected pull secret details: %#v", pullSecret.Details)
+	}
+	if len(plan.Detected.Services) != 1 || plan.Detected.Services[0].Ports[0].Port != "5601" {
+		t.Fatalf("service port not detected: %#v", plan.Detected.Services)
+	}
+	if len(plan.Detected.SecretRefs) != 1 || plan.Detected.SecretRefs[0].Name != "opensearch-admin" {
+		t.Fatalf("secret ref not detected: %#v", plan.Detected.SecretRefs)
+	}
+}
+
+func TestPlanAcceptsServiceAccountPullSecret(t *testing.T) {
+	rendered := planManifest + `---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opensearch-sa
+imagePullSecrets:
+- name: registry-cloud-kt
+`
+	docs, err := parseYAMLDocuments([]byte(rendered))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := makePlan(docs, "registry-cloud-kt")
+	if _, ok := planInputByType(plan, "imagePullSecret"); ok {
+		t.Fatalf("ServiceAccount pull secret should satisfy workload: %#v", plan.RequiredInputs)
+	}
+	if len(plan.Detected.ServiceAccounts) != 1 {
+		t.Fatalf("service account not detected: %#v", plan.Detected.ServiceAccounts)
+	}
+}
+
 func TestBuildCommandWritesArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	renderedPath := filepath.Join(dir, "rendered.yaml")
@@ -200,6 +302,42 @@ func TestBuildCommandWritesArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "images.lock.yaml")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPlanCommandWritesArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	renderedPath := filepath.Join(dir, "rendered.yaml")
+	outDir := filepath.Join(dir, "plan")
+	if err := os.WriteFile(renderedPath, []byte(planManifest), 0644); err != nil {
+		t.Fatal(err)
+	}
+	code := commandPlan([]string{
+		"--release", "opensearch",
+		"--namespace", "opensearch",
+		"--rendered-manifest", renderedPath,
+		"--pull-secret", "registry-cloud-kt",
+		"--out", outDir,
+	})
+	if code != 0 {
+		t.Fatalf("plan command returned %d", code)
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, "plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan Plan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != "NEEDS_INPUT" {
+		t.Fatalf("expected NEEDS_INPUT, got %#v", plan)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "plan.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "rendered.plan.yaml")); err != nil {
 		t.Fatal(err)
 	}
 }

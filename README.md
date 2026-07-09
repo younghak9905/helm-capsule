@@ -65,6 +65,30 @@ go build -o helm-capsule.exe ./cmd/helm-capsule
 
 ## Basic flow
 
+Plan chart-specific install inputs before building the image capsule:
+
+```bash
+helm-capsule plan bitnami/redis \
+  --release redis \
+  --namespace apps \
+  -f values.yaml \
+  --pull-secret registry-cloud-kt \
+  --kube-version 1.34.3 \
+  --out plan/
+```
+
+`plan` renders the chart and reports non-image inputs that may be required
+before install, such as:
+
+- PVCs with empty `storageClassName`
+- PodSpecs that do not reference the expected `imagePullSecret`
+- referenced Kubernetes Secrets
+- Service ports to use when wiring Gateway or Ingress routes
+
+It writes `plan.json`, `plan.yaml`, and `rendered.plan.yaml`. A `NEEDS_INPUT`
+result is not a proof failure; it means values or namespace bootstrap work
+should be completed before `build`.
+
 ```bash
 helm-capsule build bitnami/redis \
   --release redis \
@@ -166,3 +190,25 @@ choose one pull access profile outside the proof path:
 
 The capsule proves image relocation. It does not claim to manage Secret
 lifecycle.
+
+## Install planning
+
+`helm-capsule plan` intentionally does not choose a StorageClass or create
+Secrets. It identifies chart inputs that are cluster-specific so operators can
+set them explicitly in values before the proof path starts.
+
+Example for OpenSearch:
+
+```bash
+helm-capsule plan opensearch/opensearch \
+  --release opensearch \
+  --namespace opensearch \
+  -f opensearch-values.yaml \
+  --pull-secret registry-cloud-kt \
+  --kube-version 1.34.3 \
+  --out plan-opensearch
+```
+
+If the plan reports `storageClass`, set the chart value that controls
+`persistence.storageClass` or `storageClassName`, then rerun `plan` and
+`build`.
