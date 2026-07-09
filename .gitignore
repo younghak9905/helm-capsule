@@ -1,0 +1,8 @@
+bin/
+.gocache/
+.gopath/
+*.exe
+capsule/
+imported-capsule/
+*.capsule.tar
+*.capsule.tar.zst
