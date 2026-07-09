@@ -60,6 +60,19 @@ spec:
   controllerImage: docker.io/example/controller:1.0
 `
 
+const placeholderManifest = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: istio-ingressgateway
+  namespace: istio-ingress
+spec:
+  template:
+    spec:
+      containers:
+      - name: istio-proxy
+        image: auto
+`
+
 func buildLockFromManifest(t *testing.T, rendered string) (ImageLock, []byte) {
 	t.Helper()
 	docs, err := parseYAMLDocuments([]byte(rendered))
@@ -131,6 +144,27 @@ func TestCustomResourceImageLikeFieldIsUnproven(t *testing.T) {
 	proof := computeProof(rendered, lock, true)
 	if proof.Status != StatusUnproven || proof.Reason != "unsupported_image_fields_present" {
 		t.Fatalf("expected unsupported field proof, got %#v", proof)
+	}
+}
+
+func TestImageAutoPlaceholderIsNotRetargeted(t *testing.T) {
+	lock, rendered := buildLockFromManifest(t, placeholderManifest)
+	if len(lock.Images) != 1 {
+		t.Fatalf("expected 1 image, got %d", len(lock.Images))
+	}
+	entry := lock.Images[0]
+	if entry.SourceImage != "auto" {
+		t.Fatalf("expected source image auto, got %q", entry.SourceImage)
+	}
+	if entry.TargetImage != "" {
+		t.Fatalf("auto placeholder should not be retargeted, got %q", entry.TargetImage)
+	}
+	if !hasReason(entry.Reasons, "unresolved_image_placeholder") {
+		t.Fatalf("missing unresolved placeholder reason: %#v", entry.Reasons)
+	}
+	proof := computeProof(rendered, lock, true)
+	if proof.Status != StatusUnproven || proof.Reason != "unresolved_image_placeholder" {
+		t.Fatalf("expected unresolved placeholder proof, got %#v", proof)
 	}
 }
 

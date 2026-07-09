@@ -36,8 +36,11 @@ var (
 		"Job":                   {"spec", "template", "spec"},
 		"CronJob":               {"spec", "jobTemplate", "spec", "template", "spec"},
 	}
-	containerFields = []string{"initContainers", "containers", "ephemeralContainers"}
-	imageLikeRE     = regexp.MustCompile(`^(?:[a-z0-9]+(?:(?:[._-][a-z0-9]+)+|:[0-9]+)?/)?[a-z0-9][a-z0-9._/-]*(?::[\w][\w.-]{0,127})?(?:@sha256:[a-fA-F0-9]{64})?$`)
+	containerFields   = []string{"initContainers", "containers", "ephemeralContainers"}
+	imageLikeRE       = regexp.MustCompile(`^(?:[a-z0-9]+(?:(?:[._-][a-z0-9]+)+|:[0-9]+)?/)?[a-z0-9][a-z0-9._/-]*(?::[\w][\w.-]{0,127})?(?:@sha256:[a-fA-F0-9]{64})?$`)
+	imagePlaceholders = map[string]bool{
+		"auto": true,
+	}
 )
 
 type PathStep struct {
@@ -337,6 +340,10 @@ func looksLikeImage(value string) bool {
 	return imageLikeRE.MatchString(value) && (strings.Contains(value, "/") || strings.Contains(value, ":") || strings.Contains(value, "@sha256:"))
 }
 
+func isImagePlaceholder(value string) bool {
+	return imagePlaceholders[strings.ToLower(strings.TrimSpace(value))]
+}
+
 func collectUnsupportedImageFields(docs []*yaml.Node, supported map[string]bool) []UnsupportedField {
 	var out []UnsupportedField
 	var walk func(*yaml.Node, Path, string)
@@ -450,19 +457,36 @@ func addReason(reasons []string, reason string) []string {
 	return append(reasons, reason)
 }
 
+func hasReason(reasons []string, reason string) bool {
+	for _, existing := range reasons {
+		if existing == reason {
+			return true
+		}
+	}
+	return false
+}
+
 func makeLock(occurrences []ImageOccurrence, targetRegistry, platform string, helmMajor int, unsupported []UnsupportedField) ImageLock {
 	grouped := map[string]*ImageEntry{}
 	for _, occurrence := range occurrences {
 		entry, ok := grouped[occurrence.SourceImage]
 		if !ok {
 			parsed := parseImageReference(occurrence.SourceImage)
+			targetImage := ""
+			reasons := []string{}
+			if isImagePlaceholder(occurrence.SourceImage) {
+				reasons = addReason(reasons, "unresolved_image_placeholder")
+			} else {
+				targetImage = targetImageFor(occurrence.SourceImage, targetRegistry)
+			}
 			entry = &ImageEntry{
 				SourceImage:  occurrence.SourceImage,
 				SourceDigest: parsed.Digest,
-				TargetImage:  targetImageFor(occurrence.SourceImage, targetRegistry),
+				TargetImage:  targetImage,
 				Platform:     platform,
 				ArchiveTag:   archiveTagFor(occurrence.SourceImage, platform),
 				ProofStatus:  StatusUnproven,
+				Reasons:      reasons,
 			}
 			grouped[occurrence.SourceImage] = entry
 		}
@@ -485,7 +509,7 @@ func makeLock(occurrences []ImageOccurrence, targetRegistry, platform string, he
 	images := make([]ImageEntry, 0, len(keys))
 	for _, key := range keys {
 		entry := grouped[key]
-		if entry.TargetDigest == "" {
+		if entry.TargetImage != "" && entry.TargetDigest == "" {
 			entry.Reasons = addReason(entry.Reasons, "target_digest_missing")
 		}
 		if len(unsupported) > 0 {
@@ -509,6 +533,9 @@ func makeLock(occurrences []ImageOccurrence, targetRegistry, platform string, he
 }
 
 func targetRef(entry ImageEntry, requireDigest bool) (string, error) {
+	if entry.TargetImage == "" {
+		return "", fmt.Errorf("unresolved image placeholder for %s", entry.SourceImage)
+	}
 	if requireDigest && entry.TargetDigest == "" {
 		return "", fmt.Errorf("missing target_digest for %s", entry.SourceImage)
 	}
@@ -598,6 +625,22 @@ func computeProof(rendered []byte, lock ImageLock, requireDigests bool) Proof {
 		imagePaths[occurrence.Path.String()] = true
 	}
 	unsupported := collectUnsupportedImageFields(docs, imagePaths)
+
+	var unresolvedPlaceholders []string
+	for _, entry := range lock.Images {
+		if entry.TargetImage == "" || hasReason(entry.Reasons, "unresolved_image_placeholder") {
+			unresolvedPlaceholders = append(unresolvedPlaceholders, entry.SourceImage)
+		}
+	}
+	if len(unresolvedPlaceholders) > 0 {
+		return Proof{
+			Status:            StatusUnproven,
+			Reason:            "unresolved_image_placeholder",
+			ImageCount:        len(occurrences),
+			Images:            unresolvedPlaceholders,
+			UnsupportedFields: unsupported,
+		}
+	}
 
 	var missingDigests []string
 	for _, entry := range lock.Images {
@@ -907,6 +950,9 @@ func exportOCILayout(lock ImageLock, layoutDir string) error {
 		return err
 	}
 	for _, entry := range lock.Images {
+		if entry.TargetImage == "" || isImagePlaceholder(entry.SourceImage) {
+			return fmt.Errorf("cannot export unresolved image placeholder: %s", entry.SourceImage)
+		}
 		args := []string{"copy"}
 		if entry.Platform != "" {
 			osName, arch := platformParts(entry.Platform)
@@ -942,6 +988,10 @@ func commandMirror(args []string) int {
 	}
 	if *dryRun {
 		for _, entry := range lock.Images {
+			if entry.TargetImage == "" {
+				fmt.Printf("%s -> <unresolved: %s>\n", entry.SourceImage, strings.Join(entry.Reasons, ","))
+				continue
+			}
 			fmt.Printf("%s -> %s\n", entry.SourceImage, entry.TargetImage)
 		}
 		return 0
@@ -967,6 +1017,9 @@ func commandMirror(args []string) int {
 		}
 	}
 	for i := range lock.Images {
+		if lock.Images[i].TargetImage == "" {
+			return fail(fmt.Errorf("cannot mirror unresolved image placeholder: %s", lock.Images[i].SourceImage))
+		}
 		var digest string
 		var err error
 		switch selectedTool {
@@ -1202,10 +1255,15 @@ func extractArchive(archive, outDir string) error {
 
 func retargetLock(lock *ImageLock, targetRegistry string) {
 	for i := range lock.Images {
-		lock.Images[i].TargetImage = targetImageFor(lock.Images[i].SourceImage, targetRegistry)
+		if isImagePlaceholder(lock.Images[i].SourceImage) || hasReason(lock.Images[i].Reasons, "unresolved_image_placeholder") {
+			lock.Images[i].TargetImage = ""
+			lock.Images[i].Reasons = addReason(lock.Images[i].Reasons, "unresolved_image_placeholder")
+		} else {
+			lock.Images[i].TargetImage = targetImageFor(lock.Images[i].SourceImage, targetRegistry)
+			lock.Images[i].Reasons = addReason(lock.Images[i].Reasons, "target_digest_missing")
+		}
 		lock.Images[i].TargetDigest = ""
 		lock.Images[i].ProofStatus = StatusUnproven
-		lock.Images[i].Reasons = addReason(lock.Images[i].Reasons, "target_digest_missing")
 	}
 	lock.Status = StatusUnproven
 }
@@ -1270,6 +1328,9 @@ func commandImport(args []string) int {
 			return fail(errors.New("skopeo is required for disconnected import"))
 		}
 		for i := range lock.Images {
+			if lock.Images[i].TargetImage == "" {
+				return fail(fmt.Errorf("cannot import unresolved image placeholder: %s", lock.Images[i].SourceImage))
+			}
 			digest, err := mirrorWithSkopeo(lock.Images[i], layoutDir)
 			if err != nil {
 				return fail(err)

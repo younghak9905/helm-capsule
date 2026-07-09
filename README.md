@@ -143,6 +143,16 @@ It checks:
 Unsupported image-like fields are reported as `UNPROVEN`; CRD internals and
 custom resources are not guessed.
 
+## Istio `image: auto`
+
+Some Istio charts render gateway proxy containers with `image: auto`. This is a
+chart/runtime placeholder, not a concrete OCI image reference. `helm-capsule`
+does not rewrite it to `docker.io/library/auto:latest`; it reports
+`UNPROVEN` with `unresolved_image_placeholder` instead.
+
+For Istio Gateway, resolve the actual proxy image through the Istio chart values
+or installation profile first, then rebuild the capsule.
+
 ## Secret stance
 
 `helm-capsule` does not own namespace-scoped pull credentials. Operators should
