@@ -16,7 +16,46 @@ The CLI reports only:
 - `UNPROVEN`: artifacts were generated, but proof is incomplete.
 - `FAILED`: rendering, parsing, lock matching, or proof validation failed.
 
-## Build
+## Ubuntu setup
+
+Install Go from the official tarball and persist the environment variables:
+
+```bash
+GO_VERSION=1.26.5
+curl -fsSLO "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
+
+cat <<'EOF' >> ~/.profile
+export GOROOT=/usr/local/go
+export GOPATH=$HOME/go
+export PATH=$GOROOT/bin:$GOPATH/bin:$PATH
+EOF
+
+. ~/.profile
+go version
+```
+
+Install runtime tools used by Helm rendering, mirroring, and air-gap archives:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y curl git skopeo tar zstd
+
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+helm version
+```
+
+Build the CLI on Ubuntu:
+
+```bash
+go test ./...
+go build -o helm-capsule ./cmd/helm-capsule
+sudo install -m 0755 helm-capsule /usr/local/bin/helm-capsule
+helm-capsule
+```
+
+## Windows build
 
 ```powershell
 $env:PATH = "C:\Users\user\.local\go\bin;$env:PATH"
