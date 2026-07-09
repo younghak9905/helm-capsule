@@ -16,6 +16,156 @@ The CLI reports only:
 - `UNPROVEN`: artifacts were generated, but proof is incomplete.
 - `FAILED`: rendering, parsing, lock matching, or proof validation failed.
 
+## Korean quick start
+
+`helm-capsule`은 폐쇄망 또는 프라이빗 클러스터에서 Helm chart 설치 전에
+필요한 이미지를 내부 registry로 옮기고, 최종 manifest에서 `image` 필드만
+내부 registry digest로 바뀌었음을 증명하는 도구입니다.
+
+설치 흐름은 다음 순서를 권장합니다.
+
+```text
+plan -> build -> mirror -> verify -> helm upgrade --install
+```
+
+### 1. Ubuntu 설치
+
+Go가 없다면 먼저 설치합니다.
+
+```bash
+GO_VERSION=1.26.5
+curl -fsSLO "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
+
+cat <<'EOF' >> ~/.profile
+export GOROOT=/usr/local/go
+export GOPATH=$HOME/go
+export PATH=$GOROOT/bin:$GOPATH/bin:$PATH
+EOF
+
+. ~/.profile
+go version
+```
+
+필수 도구를 설치합니다.
+
+```bash
+sudo apt-get update
+sudo apt-get install -y curl git skopeo tar zstd bash-completion
+
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+helm version
+```
+
+빌드하고 설치합니다.
+
+```bash
+git clone https://github.com/younghak9905/helm-capsule.git
+cd helm-capsule
+
+go test ./...
+go build -o helm-capsule ./cmd/helm-capsule
+sudo install -m 0755 helm-capsule /usr/local/bin/helm-capsule
+```
+
+### 2. 도움말과 자동완성
+
+전체 도움말:
+
+```bash
+helm-capsule help
+```
+
+명령별 도움말:
+
+```bash
+helm-capsule help plan
+helm-capsule help build
+helm-capsule build --help
+```
+
+Ubuntu bash 자동완성:
+
+```bash
+helm-capsule completion bash | sudo tee /etc/bash_completion.d/helm-capsule >/dev/null
+source /etc/bash_completion.d/helm-capsule
+```
+
+이후 `helm-capsule ` 뒤에서 `Tab`을 누르면 사용 가능한 명령이 표시됩니다.
+
+### 3. OpenSearch 예시
+
+Helm repo를 추가합니다.
+
+```bash
+helm repo add opensearch https://opensearch-project.github.io/helm-charts/
+helm repo update
+```
+
+설치 전 입력값을 먼저 확인합니다.
+
+```bash
+helm-capsule plan opensearch/opensearch \
+  --release opensearch \
+  --namespace opensearch \
+  -f opensearch-values.yaml \
+  --pull-secret registry-cloud-kt \
+  --kube-version 1.34.3 \
+  --out plan-opensearch
+```
+
+`NEEDS_INPUT`이 나오면 `plan-opensearch/plan.yaml`을 보고 StorageClass,
+pull secret, Secret 참조, Service port 같은 값을 먼저 values나 namespace
+bootstrap에 반영합니다.
+
+이미지 capsule을 생성합니다.
+
+```bash
+helm-capsule build opensearch/opensearch \
+  --release opensearch \
+  --namespace opensearch \
+  -f opensearch-values.yaml \
+  --target-registry registry.cloud.kt.com/2e2koiqr \
+  --platform linux/amd64 \
+  --kube-version 1.34.3 \
+  --out capsule-opensearch
+```
+
+이미지를 내부 registry로 복사합니다.
+
+```bash
+cd capsule-opensearch
+skopeo login registry.cloud.kt.com
+helm-capsule mirror images.lock.yaml --tool skopeo
+```
+
+증명 결과를 확인합니다.
+
+```bash
+helm-capsule verify .
+```
+
+`PROVEN`이 나오면 Helm post-renderer로 설치합니다.
+
+```bash
+helm upgrade --install opensearch opensearch/opensearch \
+  -n opensearch \
+  --create-namespace \
+  -f ../opensearch-values.yaml \
+  --post-renderer ./post-renderer
+```
+
+### 4. 주의사항
+
+- `helm-capsule`은 Secret manager가 아닙니다. Namespace별 pull secret 또는
+  ServiceAccount 연결은 별도로 준비해야 합니다.
+- StorageClass는 자동 선택하지 않습니다. `plan`으로 필요한 입력을 확인하고
+  values에 명시합니다.
+- `verify`가 `PROVEN`이 되기 전에는 검증 완료 설치로 보지 않습니다.
+- Istio Gateway의 `image: auto`처럼 실제 OCI 이미지가 아닌 placeholder는
+  `UNPROVEN`으로 처리합니다.
+
 ## Ubuntu setup
 
 Install Go from the official tarball and persist the environment variables:
@@ -53,6 +203,23 @@ go test ./...
 go build -o helm-capsule ./cmd/helm-capsule
 sudo install -m 0755 helm-capsule /usr/local/bin/helm-capsule
 helm-capsule
+```
+
+Enable bash completion on Ubuntu:
+
+```bash
+sudo apt-get install -y bash-completion
+helm-capsule completion bash | sudo tee /etc/bash_completion.d/helm-capsule >/dev/null
+source /etc/bash_completion.d/helm-capsule
+```
+
+After this, pressing `Tab` after `helm-capsule ` shows available commands.
+Command-specific help is also available:
+
+```bash
+helm-capsule help
+helm-capsule help build
+helm-capsule build --help
 ```
 
 ## Windows build

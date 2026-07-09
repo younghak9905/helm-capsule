@@ -342,6 +342,41 @@ func TestPlanCommandWritesArtifacts(t *testing.T) {
 	}
 }
 
+func TestGlobalHelpListsWorkflowAndCompletion(t *testing.T) {
+	text := globalHelpText()
+	if !strings.Contains(text, "Workflow:") {
+		t.Fatalf("global help missing workflow:\n%s", text)
+	}
+	if !strings.Contains(text, "completion") {
+		t.Fatalf("global help missing completion command:\n%s", text)
+	}
+}
+
+func TestCommandHelpIncludesExamples(t *testing.T) {
+	text, ok := commandHelpText("build")
+	if !ok {
+		t.Fatal("build help not found")
+	}
+	if !strings.Contains(text, "Example:") || !strings.Contains(text, "--target-registry") {
+		t.Fatalf("build help missing useful content:\n%s", text)
+	}
+}
+
+func TestBashCompletionIncludesCommands(t *testing.T) {
+	script, err := completionScript("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"plan", "build", "mirror", "completion"} {
+		if !strings.Contains(script, command) {
+			t.Fatalf("completion missing %q:\n%s", command, script)
+		}
+	}
+	if !strings.Contains(script, "complete -F _helm_capsule helm-capsule") {
+		t.Fatalf("bash completion registration missing:\n%s", script)
+	}
+}
+
 func TestBuildCommandAcceptsChartBeforeFlags(t *testing.T) {
 	dir := t.TempDir()
 	renderedPath := filepath.Join(dir, "rendered.yaml")

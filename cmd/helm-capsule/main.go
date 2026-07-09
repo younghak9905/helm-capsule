@@ -1187,8 +1187,20 @@ func writePlan(plan Plan, path string) error {
 	return os.WriteFile(yamlPath, yamlData, 0644)
 }
 
+func newCommandFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	fs.Usage = func() {
+		text, ok := commandHelpText(name)
+		if !ok {
+			text = globalHelpText()
+		}
+		fmt.Fprint(fs.Output(), text)
+	}
+	return fs
+}
+
 func commandPlan(args []string) int {
-	fs := flag.NewFlagSet("plan", flag.ExitOnError)
+	fs := newCommandFlagSet("plan")
 	var values stringList
 	var apiVersions stringList
 	release := fs.String("release", "", "Helm release name")
@@ -1244,7 +1256,7 @@ func commandPlan(args []string) int {
 }
 
 func commandBuild(args []string) int {
-	fs := flag.NewFlagSet("build", flag.ExitOnError)
+	fs := newCommandFlagSet("build")
 	var values stringList
 	var apiVersions stringList
 	release := fs.String("release", "", "Helm release name")
@@ -1396,7 +1408,7 @@ func exportOCILayout(lock ImageLock, layoutDir string) error {
 }
 
 func commandMirror(args []string) int {
-	fs := flag.NewFlagSet("mirror", flag.ExitOnError)
+	fs := newCommandFlagSet("mirror")
 	tool := fs.String("tool", "auto", "auto, crane, or skopeo")
 	dryRun := fs.Bool("dry-run", false, "print mirror plan only")
 	ociLayout := fs.String("oci-layout", "", "export image content to OCI layout using skopeo")
@@ -1490,7 +1502,7 @@ func removeReason(reasons []string, reason string) []string {
 }
 
 func commandVerify(args []string) int {
-	fs := flag.NewFlagSet("verify", flag.ExitOnError)
+	fs := newCommandFlagSet("verify")
 	capsuleDir, parseArgs := splitLeadingPositional(args)
 	if err := fs.Parse(parseArgs); err != nil {
 		return fail(err)
@@ -1523,7 +1535,7 @@ func commandVerify(args []string) int {
 }
 
 func commandPostRender(args []string) int {
-	fs := flag.NewFlagSet("post-render", flag.ExitOnError)
+	fs := newCommandFlagSet("post-render")
 	lockPath := fs.String("lock", "", "images lock path")
 	if err := fs.Parse(args); err != nil {
 		return fail(err)
@@ -1565,7 +1577,7 @@ func commandPostRender(args []string) int {
 }
 
 func commandExport(args []string) int {
-	fs := flag.NewFlagSet("export", flag.ExitOnError)
+	fs := newCommandFlagSet("export")
 	output := fs.String("output", "", "capsule archive output")
 	metadataOnly := fs.Bool("metadata-only", false, "allow archive without OCI image layout")
 	capsuleDir, parseArgs := splitLeadingPositional(args)
@@ -1728,7 +1740,7 @@ func copyTree(src, dst string) error {
 }
 
 func commandImport(args []string) int {
-	fs := flag.NewFlagSet("import", flag.ExitOnError)
+	fs := newCommandFlagSet("import")
 	targetRegistry := fs.String("target-registry", "", "internal registry prefix")
 	outDir := fs.String("out", "imported-capsule", "output directory")
 	dryRun := fs.Bool("dry-run", false, "extract and retarget only")
@@ -1801,24 +1813,426 @@ func fail(err error) int {
 	return 1
 }
 
-func usage() {
-	fmt.Fprintf(os.Stderr, `helm-capsule
+func commandNames() []string {
+	return []string{"plan", "build", "mirror", "verify", "post-render", "export", "import", "completion", "help"}
+}
+
+func commandOptions(name string) []string {
+	switch name {
+	case "plan":
+		return []string{"--release", "--namespace", "-f", "--values", "--pull-secret", "--kube-version", "--out", "--rendered-manifest", "--helm-binary", "--api-version", "--help"}
+	case "build":
+		return []string{"--release", "--namespace", "-f", "--values", "--target-registry", "--platform", "--kube-version", "--out", "--rendered-manifest", "--helm-binary", "--helm-major", "--api-version", "--help"}
+	case "mirror":
+		return []string{"--dry-run", "--tool", "--oci-layout", "--push", "--help"}
+	case "verify":
+		return []string{"--help"}
+	case "post-render":
+		return []string{"--lock", "--help"}
+	case "export":
+		return []string{"--output", "--metadata-only", "--help"}
+	case "import":
+		return []string{"--target-registry", "--out", "--dry-run", "--help"}
+	case "completion":
+		return []string{"bash", "zsh", "fish", "powershell", "--help"}
+	case "help":
+		return commandNames()
+	default:
+		return nil
+	}
+}
+
+func globalHelpText() string {
+	return `helm-capsule
+
+Proof-first Helm installation capsule compiler.
+
+Workflow:
+  1. plan    Detect chart-specific install inputs such as StorageClass and pull secret wiring.
+  2. build   Render Helm and create images.lock, proof metadata, and post-renderer.
+  3. mirror  Copy locked images into the target registry and fill target digests.
+  4. verify  Prove rendered manifests change only supported image fields.
+  5. install Run helm upgrade --install with the generated post-renderer.
 
 Usage:
-  helm-capsule plan <chart> --release NAME --namespace NS --out DIR [--pull-secret NAME] [flags]
+  helm-capsule <command> [flags]
+  helm-capsule help <command>
+
+Commands:
+  plan         Detect non-image install inputs before image proof.
+  build        Compile a Helm capsule from chart, values, and target registry.
+  mirror       Copy locked images using crane or skopeo.
+  verify       Recompute proof for a capsule directory.
+  post-render  Helm post-renderer that applies images.lock.
+  export       Pack a capsule for disconnected transfer.
+  import       Import an air-gap capsule into a target registry.
+  completion   Generate shell completion scripts.
+  help         Show global or command-specific help.
+
+Examples:
+  helm-capsule help plan
+  helm-capsule plan opensearch/opensearch --release opensearch --namespace opensearch -f values.yaml --pull-secret registry-cloud-kt --out plan-opensearch
+  helm-capsule build opensearch/opensearch --release opensearch --namespace opensearch -f values.yaml --target-registry registry.internal/platform --out capsule-opensearch
+
+Enable shell completion:
+  helm-capsule completion bash | sudo tee /etc/bash_completion.d/helm-capsule >/dev/null
+`
+}
+
+func commandHelpText(name string) (string, bool) {
+	switch name {
+	case "plan":
+		return `helm-capsule plan
+
+Render a chart and report cluster-specific inputs that should be decided before build.
+
+Usage:
+  helm-capsule plan <chart> --release NAME --namespace NS --out DIR [flags]
+
+Required:
+  --release NAME       Helm release name.
+  --namespace NS       Target namespace.
+  --out DIR            Output directory for plan.json, plan.yaml, and rendered.plan.yaml.
+
+Common flags:
+  -f, --values FILE    Values file. Can be repeated.
+  --pull-secret NAME   Expected imagePullSecret name to check in PodSpecs or ServiceAccounts.
+  --kube-version VER   Kubernetes version passed to helm template.
+
+Advanced flags:
+  --api-version API    Extra API version passed to helm template. Can be repeated.
+  --helm-binary PATH   Helm binary. Default: helm.
+  --rendered-manifest FILE
+                      Use an already rendered manifest instead of running Helm.
+
+Example:
+  helm-capsule plan opensearch/opensearch \
+    --release opensearch \
+    --namespace opensearch \
+    -f opensearch-values.yaml \
+    --pull-secret registry-cloud-kt \
+    --out plan-opensearch
+`, true
+	case "build":
+		return `helm-capsule build
+
+Render a Helm chart and create the capsule artifacts used for image proof.
+
+Usage:
   helm-capsule build <chart> --release NAME --namespace NS --target-registry REG --out DIR [flags]
-  helm-capsule mirror <images.lock.yaml|json> [--dry-run] [--tool auto|crane|skopeo]
+
+Required:
+  --release NAME          Helm release name.
+  --namespace NS          Target namespace.
+  --target-registry REG   Internal registry prefix, for example registry.internal/platform.
+  --out DIR               Capsule output directory.
+
+Common flags:
+  -f, --values FILE       Values file. Can be repeated.
+  --platform PLATFORM     Target platform. Default: linux/amd64.
+  --kube-version VER      Kubernetes version passed to helm template.
+
+Advanced flags:
+  --api-version API       Extra API version passed to helm template. Can be repeated.
+  --helm-binary PATH      Helm binary. Default: helm.
+  --helm-major N          Helm major version proof mode. Default: 4.
+  --rendered-manifest FILE
+                         Use an already rendered manifest instead of running Helm.
+
+Example:
+  helm-capsule build opensearch/opensearch \
+    --release opensearch \
+    --namespace opensearch \
+    -f opensearch-values.yaml \
+    --target-registry registry.cloud.kt.com/2e2koiqr \
+    --out capsule-opensearch
+`, true
+	case "mirror":
+		return `helm-capsule mirror
+
+Copy lockfile images into the target registry and write target digests back to the lockfile.
+
+Usage:
+  helm-capsule mirror <images.lock.yaml|json> [flags]
+
+Flags:
+  --tool auto|crane|skopeo   Mirror backend. Default: auto.
+  --dry-run                  Print source -> target mapping only.
+  --oci-layout DIR           Export image content to OCI layout using skopeo.
+  --push                     Push images even when --oci-layout is used.
+
+Example:
+  helm-capsule mirror capsule-opensearch/images.lock.yaml --tool skopeo
+`, true
+	case "verify":
+		return `helm-capsule verify
+
+Recompute proof for an existing capsule directory.
+
+Usage:
   helm-capsule verify <capsule-dir>
+
+Example:
+  helm-capsule verify capsule-opensearch
+`, true
+	case "post-render":
+		return `helm-capsule post-render
+
+Helm post-renderer. Reads rendered manifests from stdin and writes rewritten manifests to stdout.
+
+Usage:
   helm-capsule post-render --lock <images.lock.yaml|json>
-  helm-capsule export <capsule-dir> --output capsule.tar.zst
-  helm-capsule import <capsule.tar.zst> --target-registry REG [--out DIR]
+
+Example:
+  helm upgrade --install opensearch opensearch/opensearch \
+    -n opensearch \
+    -f values.yaml \
+    --post-renderer ./capsule-opensearch/post-renderer
+`, true
+	case "export":
+		return `helm-capsule export
+
+Pack a capsule directory for disconnected transfer.
+
+Usage:
+  helm-capsule export <capsule-dir> --output capsule.tar.zst [flags]
+
+Flags:
+  --output FILE       Archive output path.
+  --metadata-only     Allow archive without OCI image layout.
+
+Example:
+  helm-capsule export capsule-opensearch --output opensearch.capsule.tar.zst
+`, true
+	case "import":
+		return `helm-capsule import
+
+Import an air-gap capsule and push images from its OCI layout into the target registry.
+
+Usage:
+  helm-capsule import <capsule.tar.zst> --target-registry REG [flags]
+
+Flags:
+  --target-registry REG   Internal registry prefix.
+  --out DIR               Output directory. Default: imported-capsule.
+  --dry-run               Extract and retarget only.
+
+Example:
+  helm-capsule import opensearch.capsule.tar.zst \
+    --target-registry registry.internal/platform \
+    --out imported-opensearch
+`, true
+	case "completion":
+		return `helm-capsule completion
+
+Generate shell completion scripts.
+
+Usage:
+  helm-capsule completion bash|zsh|fish|powershell
+
+Ubuntu bash setup:
+  sudo apt-get install -y bash-completion
+  helm-capsule completion bash | sudo tee /etc/bash_completion.d/helm-capsule >/dev/null
+  source /etc/bash_completion.d/helm-capsule
+
+User-local bash setup:
+  mkdir -p ~/.local/share/bash-completion/completions
+  helm-capsule completion bash > ~/.local/share/bash-completion/completions/helm-capsule
+  exec bash
+`, true
+	case "help":
+		return `helm-capsule help
+
+Show global or command-specific help.
+
+Usage:
+  helm-capsule help
+  helm-capsule help <command>
+
+Example:
+  helm-capsule help build
+`, true
+	default:
+		return "", false
+	}
+}
+
+func completionBash() string {
+	commands := strings.Join(commandNames(), " ")
+	var b strings.Builder
+	b.WriteString(`# bash completion for helm-capsule
+_helm_capsule()
+{
+  local cur cmd opts
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+
+  if [[ ${COMP_CWORD} -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "`)
+	b.WriteString(commands)
+	b.WriteString(`" -- "$cur") )
+    return 0
+  fi
+
+  cmd="${COMP_WORDS[1]}"
+  case "$cmd" in
 `)
+	for _, name := range commandNames() {
+		b.WriteString("    ")
+		b.WriteString(name)
+		b.WriteString(")\n      opts=\"")
+		b.WriteString(strings.Join(commandOptions(name), " "))
+		b.WriteString("\" ;;\n")
+	}
+	b.WriteString(`    *) opts="" ;;
+  esac
+
+  if [[ "$cur" == -* ]]; then
+    COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+    return 0
+  fi
+
+  COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+  return 0
+}
+complete -F _helm_capsule helm-capsule
+`)
+	return b.String()
+}
+
+func completionZsh() string {
+	commands := strings.Join(commandNames(), " ")
+	return fmt.Sprintf(`#compdef helm-capsule
+
+_helm_capsule() {
+  local -a commands
+  commands=(%s)
+
+  if (( CURRENT == 2 )); then
+    _describe 'command' commands
+    return
+  fi
+
+  case "$words[2]" in
+    plan) _arguments '*: :((--release --namespace -f --values --pull-secret --kube-version --out --rendered-manifest --helm-binary --api-version --help))' ;;
+    build) _arguments '*: :((--release --namespace -f --values --target-registry --platform --kube-version --out --rendered-manifest --helm-binary --helm-major --api-version --help))' ;;
+    mirror) _arguments '*: :((--dry-run --tool --oci-layout --push --help))' ;;
+    verify) _files ;;
+    post-render) _arguments '*: :((--lock --help))' ;;
+    export) _arguments '*: :((--output --metadata-only --help))' ;;
+    import) _arguments '*: :((--target-registry --out --dry-run --help))' ;;
+    completion) _arguments '*: :((bash zsh fish powershell --help))' ;;
+    help) _arguments '*: :((%s))' ;;
+  esac
+}
+
+_helm_capsule
+`, commands, commands)
+}
+
+func completionFish() string {
+	var b strings.Builder
+	b.WriteString("# fish completion for helm-capsule\n")
+	for _, name := range commandNames() {
+		b.WriteString(fmt.Sprintf("complete -c helm-capsule -f -n '__fish_use_subcommand' -a %q\n", name))
+		for _, opt := range commandOptions(name) {
+			if strings.HasPrefix(opt, "--") {
+				b.WriteString(fmt.Sprintf("complete -c helm-capsule -f -n '__fish_seen_subcommand_from %s' -l %s\n", name, strings.TrimPrefix(opt, "--")))
+			}
+		}
+	}
+	return b.String()
+}
+
+func completionPowerShell() string {
+	commands := strings.Join(commandNames(), "', '")
+	return fmt.Sprintf(`Register-ArgumentCompleter -Native -CommandName helm-capsule -ScriptBlock {
+  param($wordToComplete, $commandAst, $cursorPosition)
+  $words = $commandAst.CommandElements | ForEach-Object { $_.ToString() }
+  $commands = @('%s')
+  $options = @{
+    plan = @('--release', '--namespace', '-f', '--values', '--pull-secret', '--kube-version', '--out', '--rendered-manifest', '--helm-binary', '--api-version', '--help')
+    build = @('--release', '--namespace', '-f', '--values', '--target-registry', '--platform', '--kube-version', '--out', '--rendered-manifest', '--helm-binary', '--helm-major', '--api-version', '--help')
+    mirror = @('--dry-run', '--tool', '--oci-layout', '--push', '--help')
+    verify = @('--help')
+    'post-render' = @('--lock', '--help')
+    export = @('--output', '--metadata-only', '--help')
+    import = @('--target-registry', '--out', '--dry-run', '--help')
+    completion = @('bash', 'zsh', 'fish', 'powershell', '--help')
+    help = $commands
+  }
+  if ($words.Count -le 2) {
+    $candidates = $commands
+  } else {
+    $cmd = $words[1]
+    $candidates = $options[$cmd]
+  }
+  $candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+  }
+}
+`, commands)
+}
+
+func completionScript(shell string) (string, error) {
+	switch shell {
+	case "bash":
+		return completionBash(), nil
+	case "zsh":
+		return completionZsh(), nil
+	case "fish":
+		return completionFish(), nil
+	case "powershell":
+		return completionPowerShell(), nil
+	default:
+		return "", fmt.Errorf("unsupported shell %q; expected bash, zsh, fish, or powershell", shell)
+	}
+}
+
+func commandCompletion(args []string) int {
+	fs := newCommandFlagSet("completion")
+	if err := fs.Parse(args); err != nil {
+		return fail(err)
+	}
+	if fs.NArg() != 1 {
+		return fail(errors.New("completion requires shell: bash, zsh, fish, or powershell"))
+	}
+	script, err := completionScript(fs.Arg(0))
+	if err != nil {
+		return fail(err)
+	}
+	fmt.Print(script)
+	return 0
+}
+
+func commandHelp(args []string) int {
+	if len(args) == 0 {
+		fmt.Print(globalHelpText())
+		return 0
+	}
+	if len(args) != 1 {
+		return fail(errors.New("help accepts at most one command"))
+	}
+	text, ok := commandHelpText(args[0])
+	if !ok {
+		return fail(fmt.Errorf("unknown command: %s", args[0]))
+	}
+	fmt.Print(text)
+	return 0
+}
+
+func usage() {
+	fmt.Fprint(os.Stderr, globalHelpText())
 }
 
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
+	}
+	if os.Args[1] == "-h" || os.Args[1] == "--help" {
+		fmt.Print(globalHelpText())
+		os.Exit(0)
 	}
 	var code int
 	switch os.Args[1] {
@@ -1836,6 +2250,10 @@ func main() {
 		code = commandExport(os.Args[2:])
 	case "import":
 		code = commandImport(os.Args[2:])
+	case "completion":
+		code = commandCompletion(os.Args[2:])
+	case "help":
+		code = commandHelp(os.Args[2:])
 	default:
 		usage()
 		code = 2
