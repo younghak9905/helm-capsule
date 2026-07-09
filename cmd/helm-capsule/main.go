@@ -784,11 +784,18 @@ func commandBuild(args []string) int {
 	fs.Var(&values, "f", "values file")
 	fs.Var(&values, "values", "values file")
 	fs.Var(&apiVersions, "api-version", "Kubernetes API version for helm template")
-	if err := fs.Parse(args); err != nil {
+
+	chart := ""
+	parseArgs := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		chart = args[0]
+		parseArgs = args[1:]
+	}
+
+	if err := fs.Parse(parseArgs); err != nil {
 		return fail(err)
 	}
-	chart := ""
-	if fs.NArg() > 0 {
+	if chart == "" && fs.NArg() > 0 {
 		chart = fs.Arg(0)
 	}
 	if *release == "" || *namespace == "" || *targetRegistry == "" || *outDir == "" {

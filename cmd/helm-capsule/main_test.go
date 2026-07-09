@@ -169,3 +169,28 @@ func TestBuildCommandWritesArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestBuildCommandAcceptsChartBeforeFlags(t *testing.T) {
+	dir := t.TempDir()
+	renderedPath := filepath.Join(dir, "rendered.yaml")
+	outDir := filepath.Join(dir, "capsule")
+	if err := os.WriteFile(renderedPath, []byte(manifest), 0644); err != nil {
+		t.Fatal(err)
+	}
+	code := commandBuild([]string{
+		"istio/gateway",
+		"--release", "istio-ingressgateway",
+		"--namespace", "istio-ingress",
+		"--target-registry", "registry.internal/platform",
+		"--platform", "linux/amd64",
+		"--kube-version", "1.34.3",
+		"--rendered-manifest", renderedPath,
+		"--out", outDir,
+	})
+	if code != 0 {
+		t.Fatalf("build command returned %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "images.lock.json")); err != nil {
+		t.Fatal(err)
+	}
+}
