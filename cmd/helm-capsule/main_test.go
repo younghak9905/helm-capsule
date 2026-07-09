@@ -228,3 +228,49 @@ func TestBuildCommandAcceptsChartBeforeFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMirrorCommandAcceptsLockfileBeforeFlags(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "images.lock.json")
+	lock := ImageLock{
+		APIVersion: "helm-capsule/v1alpha1",
+		Kind:       "ImageLock",
+		Status:     StatusUnproven,
+		Images: []ImageEntry{{
+			SourceImage: "registry.istio.io/release/pilot:1.30.2",
+			TargetImage: "registry.cloud.kt.com/registry.istio.io/release/pilot:1.30.2",
+			Platform:    "linux/amd64",
+		}},
+	}
+	if err := writeLock(lock, lockPath); err != nil {
+		t.Fatal(err)
+	}
+	code := commandMirror([]string{filepath.Join(dir, "images.lock.yaml"), "--dry-run"})
+	if code != 0 {
+		t.Fatalf("mirror command returned %d", code)
+	}
+}
+
+func TestExportCommandAcceptsCapsuleBeforeFlags(t *testing.T) {
+	dir := t.TempDir()
+	capsuleDir := filepath.Join(dir, "capsule")
+	if err := os.MkdirAll(capsuleDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	lock := ImageLock{
+		APIVersion: "helm-capsule/v1alpha1",
+		Kind:       "ImageLock",
+		Status:     StatusProven,
+	}
+	if err := writeLock(lock, filepath.Join(capsuleDir, "images.lock.json")); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "capsule.tar")
+	code := commandExport([]string{capsuleDir, "--output", output, "--metadata-only"})
+	if code != 0 {
+		t.Fatalf("export command returned %d", code)
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatal(err)
+	}
+}

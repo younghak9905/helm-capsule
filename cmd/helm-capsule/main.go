@@ -113,6 +113,13 @@ func (s *stringList) Set(value string) error {
 	return nil
 }
 
+func splitLeadingPositional(args []string) (string, []string) {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return args[0], args[1:]
+	}
+	return "", args
+}
+
 func keyStep(key string) PathStep {
 	return PathStep{Key: key}
 }
@@ -828,13 +835,7 @@ func commandBuild(args []string) int {
 	fs.Var(&values, "values", "values file")
 	fs.Var(&apiVersions, "api-version", "Kubernetes API version for helm template")
 
-	chart := ""
-	parseArgs := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		chart = args[0]
-		parseArgs = args[1:]
-	}
-
+	chart, parseArgs := splitLeadingPositional(args)
 	if err := fs.Parse(parseArgs); err != nil {
 		return fail(err)
 	}
@@ -975,13 +976,16 @@ func commandMirror(args []string) int {
 	dryRun := fs.Bool("dry-run", false, "print mirror plan only")
 	ociLayout := fs.String("oci-layout", "", "export image content to OCI layout using skopeo")
 	push := fs.Bool("push", false, "push images even when --oci-layout is used")
-	if err := fs.Parse(args); err != nil {
+	lockPath, parseArgs := splitLeadingPositional(args)
+	if err := fs.Parse(parseArgs); err != nil {
 		return fail(err)
 	}
-	if fs.NArg() != 1 {
+	if lockPath == "" && fs.NArg() == 1 {
+		lockPath = fs.Arg(0)
+	}
+	if lockPath == "" || fs.NArg() > 0 {
 		return fail(errors.New("mirror requires images.lock.yaml or images.lock.json"))
 	}
-	lockPath := fs.Arg(0)
 	lock, err := readLock(lockPath)
 	if err != nil {
 		return fail(err)
@@ -1062,13 +1066,16 @@ func removeReason(reasons []string, reason string) []string {
 
 func commandVerify(args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
-	if err := fs.Parse(args); err != nil {
+	capsuleDir, parseArgs := splitLeadingPositional(args)
+	if err := fs.Parse(parseArgs); err != nil {
 		return fail(err)
 	}
-	if fs.NArg() != 1 {
+	if capsuleDir == "" && fs.NArg() == 1 {
+		capsuleDir = fs.Arg(0)
+	}
+	if capsuleDir == "" || fs.NArg() > 0 {
 		return fail(errors.New("verify requires capsule directory"))
 	}
-	capsuleDir := fs.Arg(0)
 	lock, err := readLock(filepath.Join(capsuleDir, "images.lock.json"))
 	if err != nil {
 		return fail(err)
@@ -1136,13 +1143,16 @@ func commandExport(args []string) int {
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
 	output := fs.String("output", "", "capsule archive output")
 	metadataOnly := fs.Bool("metadata-only", false, "allow archive without OCI image layout")
-	if err := fs.Parse(args); err != nil {
+	capsuleDir, parseArgs := splitLeadingPositional(args)
+	if err := fs.Parse(parseArgs); err != nil {
 		return fail(err)
 	}
-	if fs.NArg() != 1 || *output == "" {
+	if capsuleDir == "" && fs.NArg() == 1 {
+		capsuleDir = fs.Arg(0)
+	}
+	if capsuleDir == "" || fs.NArg() > 0 || *output == "" {
 		return fail(errors.New("export requires capsule directory and --output"))
 	}
-	capsuleDir := fs.Arg(0)
 	lock, err := readLock(filepath.Join(capsuleDir, "images.lock.json"))
 	if err != nil {
 		return fail(err)
@@ -1297,10 +1307,14 @@ func commandImport(args []string) int {
 	targetRegistry := fs.String("target-registry", "", "internal registry prefix")
 	outDir := fs.String("out", "imported-capsule", "output directory")
 	dryRun := fs.Bool("dry-run", false, "extract and retarget only")
-	if err := fs.Parse(args); err != nil {
+	archive, parseArgs := splitLeadingPositional(args)
+	if err := fs.Parse(parseArgs); err != nil {
 		return fail(err)
 	}
-	if fs.NArg() != 1 || *targetRegistry == "" {
+	if archive == "" && fs.NArg() == 1 {
+		archive = fs.Arg(0)
+	}
+	if archive == "" || fs.NArg() > 0 || *targetRegistry == "" {
 		return fail(errors.New("import requires archive and --target-registry"))
 	}
 	tempDir, err := os.MkdirTemp("", "helm-capsule-import-*")
@@ -1308,7 +1322,7 @@ func commandImport(args []string) int {
 		return fail(err)
 	}
 	defer os.RemoveAll(tempDir)
-	if err := extractArchive(fs.Arg(0), tempDir); err != nil {
+	if err := extractArchive(archive, tempDir); err != nil {
 		return fail(err)
 	}
 	lockPath := filepath.Join(tempDir, "images.lock.json")
